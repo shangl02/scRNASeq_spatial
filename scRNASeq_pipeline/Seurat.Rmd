@@ -1,0 +1,213 @@
+---
+title: "scRNASeq Seurat pipeline"
+output: html_notebook
+---
+
+# Prepare pipeline environment
+It's recommended to use bioconductor docker container (https://bioconductor.org/help/docker/) becuase it's easy to install all kinds of R packages, and it also includes Rstudio.
+The tutorial in the webpage has instructions to run using docker. If you are using HPC, then it's recommended to run this pipeline using singularity. You can download the docker image using singularity with the command:
+
+    singularity pull docker://bioconductor/bioconductor_docker
+    
+Singularity image file is not writable, you can transfer it to a sandbox and then you will be able to install packages inside it without administrator role. The commands are:
+
+    singularity build --sandbox biocon_3_15/ bioconductor_docker_RELEASE_3_15.sif
+    
+    PASSWORD='bioc' singularity run -w -B /:/media biocon_3_15/ rserver --auth-none=0  --auth-pam-helper-path=pam-helper  --server-user lis262
+
+In the end, you can open rstudio in the browser with url **localhost:8787**. 
+
+```{r install softwares}
+# packages = c("Seurat", "glue")
+# BiocManager::install(packages)
+```
+
+# 0. Load packages
+```{r load modules}
+library(Seurat)
+library(glue)
+library(patchwork)
+library(reader)
+library(ggplot2)
+```
+
+# 1. Read in the data
+For 10X genomics data, it has 3 files, please make sure the 3 files are in one folder for one sample. And file names need to be one of the two following sets: (1) For Cellranger V3 output:  **matrix.mtx.gz, barcodes.tsv.gz, features.tsv.gz**. (2) For Cellranger V2 output: **matrix.mtx, barcodes.tsv, genes.tsv**. <br/>
+Basically each sample would have one folder and then put them in one folder
+
+```{r define parameters}
+work_dir = '/media//hpc/grid/wip_drm_targetsciences/projects/p051_senescence_esf/public/crohn_LPL/'
+meta_fn = ''
+version = 2
+raw_path = glue('{work_dir}/f01_raw/')
+prefixes = list.dirs(raw_path)
+prefixes = prefixes[2:length(prefixes)]
+```
+
+## 1.1 Check feature/gene file
+Sometimes the feature/gene file has only one column (usually gene name), in this case you need to set parameter **feature.column=1** when using ReadMtx function to read data.
+
+```{r}
+if (version == 2){
+  feature_fn = 'genes.tsv'
+} else if (version == 3) {
+  feature_fn = 'features.tsv.gz'
+}
+for (pre in prefixes) {
+  fn = glue('{pre}/{feature_fn}')
+  df = read.table(fn,sep='\t')
+  # add column
+  if (ncol(df) == 1) {
+    df$V2 = toupper(df$V1)
+  }
+  if (ncol(df) ==2) {
+    df$V3 = "Gene Expression"
+  }
+  # write
+  if (version == 2) {
+    write.table(df, fn, sep='\t', quote=F,col.names=F,row.names=F)  
+  } else if (version == 3) {
+    gz <- gzfile(fn, "w")
+    write.csv(df, gz)
+    close(gz1)
+  }
+}
+```
+
+
+```{r load 10X genomics gene expression}
+obj_list = list()
+for (pre in prefixes) {
+  expr_mtx = Read10X(pre)
+  obj = CreateSeuratObject(counts = expr_mtx)
+  # make gene name as capital
+  # add to list
+  obj_list = append(obj_list, obj)
+}
+```
+
+# 2. Preprocessing
+## 2.1 QC data
+Plot distribution of gene_number, read_count, mitochondria percentage.
+```{r add some meta data}
+# add sample id
+for (i in 1:length(obj_list)){
+  obj_list[[i]][["Sample"]] <- basename(prefixes[i])
+}
+# add MT percent
+for (i in (1:length(obj_list))){
+  obj_list[[i]][["percent.mt"]] <- PercentageFeatureSet(obj_list[[i]], pattern = "^MT-")
+}
+# merge data
+if (length(obj_list) == 1) {
+  obj = obj_list
+} else {
+  names = c()
+  for (p in prefixes) {names = c(names,basename(p))}
+  obj <- merge(obj_list[[1]], y = c(obj_list[2:length(obj_list)]), add.cell.ids=names)
+}
+```
+
+```{r QC1: featrue scatter plot}
+plot1 = FeatureScatter(obj, feature1 = "nCount_RNA", feature2 = "percent.mt") + NoLegend()
+plot2 = FeatureScatter(obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + NoLegend()
+plot1 + plot2
+```
+
+```{r features violin plot}
+VlnPlot(obj, features = c("nFeature_RNA","nCount_RNA","percent.mt"), group.by = "Sample") + NoLegend()
+```
+```{r nCounts_RNA histogram}
+data = FetchData(obj, vars=c('nCount_RNA'))
+ggplot(data, aes(x=nCount_RNA)) + geom_histogram(bins=100)
+ggplot(data, aes(x=nCount_RNA)) + geom_histogram(bins=100) + xlim(0,10000)
+```
+
+```{r nGenes histogram}
+data = FetchData(obj, vars=c('nFeature_RNA'))
+ggplot(data, aes(x=nFeature_RNA)) + geom_histogram(bins=100)
+ggplot(data, aes(x=nFeature_RNA)) + geom_histogram(bins=100) + xlim(0,2000)
+```
+
+```{r add metadata if available}
+if (file.exists(meta_fn)) {
+  meta_df = read.table(meta_fn,sep="\t",header=TRUE)
+}
+```
+
+Filter based on nCount, nFeatures and MT
+```{r}
+obj_2 <- subset(obj, subset = nFeature_RNA > 400 & nCount_RNA > 1000 & nCount_RNA < 30000 & percent.mt < 15)
+VlnPlot(obj_2, features = c("nFeature_RNA","nCount_RNA","percent.mt"), group.by = "Sample") + NoLegend()
+```
+## 2.2 Normalization and batch effect
+```{r normalization}
+obj_list = SplitObject(obj_2, split.by="Sample")
+obj_list = lapply(X=obj_list, FUN=SCTransform)
+features = SelectIntegrationFeatures(object.list = obj_list, nfeatures= 3000)
+obj_list = PrepSCTIntegration(object.list = obj_list, anchor.features = features)
+# anchors
+anchors = FindIntegrationAnchors(object.list = obj_list, normalization.method = "SCT", anchor.features = features)
+combined_sct = IntegrateData(anchorset = anchors, normalization.method = "SCT")
+combined_sct = RunPCA(combined_sct, verbose = F)
+combined_sct = RunUMAP(combined_sct, reduction = "pca", dims = 1:30)
+combined_sct = RunTSNE(combined_sct, reduction = "pca", dims = 1:30)
+```
+
+```{r}
+DimPlot(combined_sct, reduction = "umap", group.by = "Sample")
+DimPlot(combined_sct, reduction = "tsne", group.by = "Sample")
+```
+## 2.3 High varaible genes
+```{r fig.align="center", echo = FALSE,fig.width = 12,fig.height=4}
+combined_sct = FindVariableFeatures(combined_sct, selection.method="vst", nefeatures = 2000)
+top10 = head(VariableFeatures(combined_sct))
+# plot
+plot1 = VariableFeaturePlot(combined_sct)
+plot2 = LabelPoints(plot = plot1, points = top10, repel = T)
+plot1 + plot2
+```
+## 2.4 Scale the data
+```{r}
+all.genes = rownames(combined_sct)
+combined_sct = ScaleData(combined_sct, features = all.genes)
+```
+## 2.5 Dimention Reduction
+```{r}
+combined_sct = RunPCA(combined_sct, features = VariableFeatures(object=combined_sct))
+print(combined_sct[["pca"]], dim=1:5, nfeatures=5)
+```
+
+```{r}
+VizDimLoadings(combined_sct, dims = 1:2, reduction = "pca")
+DimPlot(combined_sct, reduction = "pca")
+DimHeatmap(combined_sct, dims = 1, cells = 500, balanced = TRUE)
+DimHeatmap(combined_sct, dims = 1:15, cells = 500, balanced = TRUE)
+```
+Determine number of PCs to use
+```{r}
+ElbowPlot(combined_sct)
+```
+
+# 3. Clustering and annotating
+## 3.1 Run cluster
+```{r}
+combined_sct = FindNeighbors(combined_sct, dims = 1:12)
+combined_sct = FindClusters(combined_sct, resolution = 0.5)
+```
+Non-linear reduction
+```{r UMAP}
+combined_sct = RunUMAP(combined_sct, dims = 1:10)
+DimPlot(combined_sct, reduction = "umap")
+```
+
+## 3.2 Cluster Annotation
+```{r}
+
+```
+
+
+
+
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
