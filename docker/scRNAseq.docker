@@ -1,0 +1,14 @@
+FROM rocker/tidyverse:4.4.2
+
+ENV LD_LIBRARY_PATH /usr/local/lib/R/lib/:$LD_LIBRARY_PATH
+
+RUN apt update && apt install python3-pip libglpk.so.40 libhdf5-dev
+
+RUN pip install jupyterlab scanpy muon rpy2 anndata2ri scirpy gprofiler-official gsea harmonypy mvtcr omnipath decoupler scarches gseapy 
+
+RUN Rscript -e "if (!require("BiocManager", quietly = TRUE))
+    {install.packages("BiocManager")}; \
+    install.packages('Seurat'); \
+	BiocManager::install(c('scran','MAST','monocle','ComplexHeatmap','slingshot','clusterExperiment','DropletUtils','gam'))"
+
+CMD ["/bin/bash"]
