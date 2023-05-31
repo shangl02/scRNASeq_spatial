@@ -10,4 +10,4 @@ In folder projects, it has jupyter notebooks for each separate customized analys
 	singularity pull docker://shl198/sc_ppl:202306
 
 ## How to run the workflow
-Users can follow the steps in file run_jupyterlab_in_HPC.md in parent directory to run the workflow.
+Users can follow the steps in file run_jupyterlab_in_HPC.md in parent directory to setup the environment. The detailed steps are described in the jupyter notebooks. 
