@@ -78,7 +78,7 @@ def read_10x_h5_files(h5_fns, **kwargs):
 
 
 # preprocessing qc
-def qc_plots(adata):
+def qc_metrics_and_plots(adata):
     sc.pp.calculate_qc_metrics(adata,inplace=True)
     adata.obs['n_genes'] = (adata.X > 0).sum(1)
     mt_gene_mask = [gene.startswith('MT-') for gene in adata.var_names]
@@ -91,8 +91,9 @@ def qc_plots(adata):
     adata.obs['largest_count_frac'] = np.max(adata_pp.X.A, axis=1) / adata.obs['total_counts']
     del adata_pp
     # Sample quality plots
-    t1 = sc.pl.violin(adata, 'total_counts', groupby='sample', size=1, log=True,cut=0,rotation=90, figsize=(2,2))
-    t2 = sc.pl.violin(adata, ['mt_frac','n_genes','ribo_frac', 'largest_count_frac'], groupby='sample', rotation=90)
+    t1 = sc.pl.violin(adata, ['total_counts'], groupby='sample', size=1, log=True,cut=0,rotation=90, figsize=(2,2))
+    t2 = sc.pl.violin(adata, ['mt_frac','n_genes'], groupby='sample', rotation=90)
+    t2 = sc.pl.violin(adata, ['ribo_frac', 'largest_count_frac'], groupby='sample', rotation=90)
     # ncount and ngenes summary, you can change the axis region to zoom in
     p1 = sc.pl.scatter(adata,'total_counts','n_genes', color='mt_frac')
     p2 = sc.pl.scatter(adata[adata.obs['total_counts']<5000], 'total_counts', 'n_genes', color='mt_frac')
